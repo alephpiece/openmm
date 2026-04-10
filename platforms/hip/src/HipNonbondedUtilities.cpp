@@ -399,7 +399,7 @@ double HipNonbondedUtilities::getMaxCutoffDistance() {
 }
 
 double HipNonbondedUtilities::padCutoff(double cutoff) {
-    double padding = (usePadding ? 0.08*cutoff : 0.0);
+    double padding = (usePadding ? 0.12*cutoff : 0.0);
     return cutoff+padding;
 }
 
