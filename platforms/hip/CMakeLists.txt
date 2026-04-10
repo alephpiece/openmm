@@ -12,7 +12,21 @@
 #   libOpenMMHIP_static.a
 #----------------------------------------------------
 
-FIND_PACKAGE(HIPRTC CONFIG)
+IF(NOT TARGET hiprtc::hiprtc)
+    add_library(hiprtc::hiprtc SHARED IMPORTED)
+    set_target_properties(hiprtc::hiprtc PROPERTIES
+        IMPORTED_LOCATION "/opt/dtk/hip/lib/libhiprtc.so"
+        INTERFACE_INCLUDE_DIRECTORIES "/opt/dtk/hip/include"
+    )
+ENDIF()
+
+IF(NOT TARGET hiprtc::hiprtc)
+    add_library(hiprtc::hiprtc SHARED IMPORTED)
+    set_target_properties(hiprtc::hiprtc PROPERTIES
+        IMPORTED_LOCATION "/opt/dtk/hip/lib/libhiprtc.so"
+        INTERFACE_INCLUDE_DIRECTORIES "/opt/dtk/hip/include"
+    )
+ENDIF()
 
 SET(OPENMM_BUILD_HIP_TESTS TRUE CACHE BOOL "Whether to build HIP test cases")
 IF(BUILD_TESTING AND OPENMM_BUILD_HIP_TESTS)
