@@ -65,16 +65,15 @@ HipNonbondedUtilities::HipNonbondedUtilities(HipContext& context) : context(cont
     string errorMessage = "Error initializing nonbonded utilities";
     CHECK_RESULT(hipEventCreateWithFlags(&downloadCountEvent, context.getEventFlags()));
     CHECK_RESULT(hipHostMalloc((void**) &pinnedCountBuffer, 2*sizeof(unsigned int), context.getHostMallocFlags()));
-    numForceThreadBlocks = 5*4*context.getMultiprocessors();
-    forceThreadBlockSize = 64;
-    findInteractingBlocksThreadBlockSize = context.getSIMDWidth();
+    numForceThreadBlocks = 16*4*context.getMultiprocessors();
+    forceThreadBlockSize = 256;
+    findInteractingBlocksThreadBlockSize = 128;
 
     // When building the neighbor list, we can optionally use large blocks (32 * warpSize atoms) to
     // accelerate the process.  This makes building the neighbor list faster, but it prevents
     // us from sorting atom blocks by size, which leads to a slightly less efficient neighbor
     // list.  We guess based on system size which will be faster.
-
-    useLargeBlocks = (context.getNumAtoms() > 90000);
+    useLargeBlocks = false;
     setKernelSource(HipKernelSources::nonbonded);
 }
 
