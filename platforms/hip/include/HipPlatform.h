@@ -111,13 +111,21 @@ public:
         static const std::string key = "DeterministicForces";
         return key;
     }
+    /**
+     * This is the name of the parameter for selecting which FFT backend to use.
+     */
+    static const std::string& HipFFTBackend() {
+        static const std::string key = "FFTBackend";
+        return key;
+    }
 };
 
 class OPENMM_EXPORT_COMMON HipPlatform::PlatformData {
 public:
     PlatformData(ContextImpl* context, const System& system, const std::string& deviceIndexProperty, const std::string& blockingProperty, const std::string& precisionProperty,
             const std::string& cpuPmeProperty, const std::string& tempProperty,
-            const std::string& pmeStreamProperty, const std::string& deterministicForcesProperty, int numThreads, ContextImpl* originalContext);
+            const std::string& pmeStreamProperty, const std::string& deterministicForcesProperty, const std::string& fftBackendProperty,
+            int numThreads, ContextImpl* originalContext);
     ~PlatformData();
     void initializeContexts(const System& system);
     void syncContexts();

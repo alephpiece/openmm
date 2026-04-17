@@ -69,6 +69,7 @@ HipPlatform::HipPlatform() {
     deprecatedPropertyReplacements["HipTempDirectory"] = HipTempDirectory();
     deprecatedPropertyReplacements["HipDisablePmeStream"] = HipDisablePmeStream();
     deprecatedPropertyReplacements["HipDeterministicForces"] = HipDeterministicForces();
+    deprecatedPropertyReplacements["HipFFTBackend"] = HipFFTBackend();
     HipKernelFactory* factory = new HipKernelFactory();
     registerKernelFactory(CalcForcesAndEnergyKernel::Name(), factory);
     registerKernelFactory(UpdateStateDataKernel::Name(), factory);
@@ -122,6 +123,7 @@ HipPlatform::HipPlatform() {
     platformProperties.push_back(HipTempDirectory());
     platformProperties.push_back(HipDisablePmeStream());
     platformProperties.push_back(HipDeterministicForces());
+    platformProperties.push_back(HipFFTBackend());
     setPropertyDefaultValue(HipDeviceIndex(), "");
     setPropertyDefaultValue(HipDeviceName(), "");
     setPropertyDefaultValue(HipUseBlockingSync(), "true");
@@ -129,6 +131,7 @@ HipPlatform::HipPlatform() {
     setPropertyDefaultValue(HipUseCpuPme(), "false");
     setPropertyDefaultValue(HipDisablePmeStream(), "false");
     setPropertyDefaultValue(HipDeterministicForces(), "false");
+    setPropertyDefaultValue(HipFFTBackend(), "vkfft");
 #ifdef _MSC_VER
     setPropertyDefaultValue(HipTempDirectory(), string(getenv("TEMP")));
 #else
@@ -213,11 +216,14 @@ void HipPlatform::contextCreated(ContextImpl& context, const map<string, string>
             getPropertyDefaultValue(HipDisablePmeStream()) : properties.find(HipDisablePmeStream())->second);
     string deterministicForcesValue = (properties.find(HipDeterministicForces()) == properties.end() ?
             getPropertyDefaultValue(HipDeterministicForces()) : properties.find(HipDeterministicForces())->second);
+    string fftBackendValue = (properties.find(HipFFTBackend()) == properties.end() ?
+            getPropertyDefaultValue(HipFFTBackend()) : properties.find(HipFFTBackend())->second);
     transform(blockingPropValue.begin(), blockingPropValue.end(), blockingPropValue.begin(), ::tolower);
     transform(precisionPropValue.begin(), precisionPropValue.end(), precisionPropValue.begin(), ::tolower);
     transform(cpuPmePropValue.begin(), cpuPmePropValue.end(), cpuPmePropValue.begin(), ::tolower);
     transform(pmeStreamPropValue.begin(), pmeStreamPropValue.end(), pmeStreamPropValue.begin(), ::tolower);
     transform(deterministicForcesValue.begin(), deterministicForcesValue.end(), deterministicForcesValue.begin(), ::tolower);
+    transform(fftBackendValue.begin(), fftBackendValue.end(), fftBackendValue.begin(), ::tolower);
     vector<string> pmeKernelName;
     pmeKernelName.push_back(CalcPmeReciprocalForceKernel::Name());
     if (!supportsKernels(pmeKernelName))
@@ -227,7 +233,7 @@ void HipPlatform::contextCreated(ContextImpl& context, const map<string, string>
     if (threadsEnv != NULL)
         stringstream(threadsEnv) >> threads;
     context.setPlatformData(new PlatformData(&context, context.getSystem(), devicePropValue, blockingPropValue, precisionPropValue, cpuPmePropValue, tempPropValue,
-            pmeStreamPropValue, deterministicForcesValue, threads, NULL));
+            pmeStreamPropValue, deterministicForcesValue, fftBackendValue, threads, NULL));
 }
 
 void HipPlatform::linkedContextCreated(ContextImpl& context, ContextImpl& originalContext) const {
@@ -239,9 +245,10 @@ void HipPlatform::linkedContextCreated(ContextImpl& context, ContextImpl& origin
     string tempPropValue = platform.getPropertyValue(originalContext.getOwner(), HipTempDirectory());
     string pmeStreamPropValue = platform.getPropertyValue(originalContext.getOwner(), HipDisablePmeStream());
     string deterministicForcesValue = platform.getPropertyValue(originalContext.getOwner(), HipDeterministicForces());
+    string fftBackendValue = platform.getPropertyValue(originalContext.getOwner(), HipFFTBackend());
     int threads = reinterpret_cast<PlatformData*>(originalContext.getPlatformData())->threads.getNumThreads();
     context.setPlatformData(new PlatformData(&context, context.getSystem(), devicePropValue, blockingPropValue, precisionPropValue, cpuPmePropValue, tempPropValue,
-            pmeStreamPropValue, deterministicForcesValue, threads, &originalContext));
+            pmeStreamPropValue, deterministicForcesValue, fftBackendValue, threads, &originalContext));
 }
 
 void HipPlatform::contextDestroyed(ContextImpl& context) const {
@@ -250,8 +257,8 @@ void HipPlatform::contextDestroyed(ContextImpl& context) const {
 }
 
 HipPlatform::PlatformData::PlatformData(ContextImpl* context, const System& system, const string& deviceIndexProperty, const string& blockingProperty, const string& precisionProperty,
-            const string& cpuPmeProperty, const string& tempProperty, const string& pmeStreamProperty,
-            const string& deterministicForcesProperty, int numThreads, ContextImpl* originalContext) :
+              const string& cpuPmeProperty, const string& tempProperty, const string& pmeStreamProperty,
+              const string& deterministicForcesProperty, const string& fftBackendProperty, int numThreads, ContextImpl* originalContext) :
                 context(context), removeCM(false), stepCount(0), computeForceCount(0), time(0.0), hasInitializedContexts(false),
                 threads(numThreads) {
     bool blocking = (blockingProperty == "true");
@@ -306,6 +313,7 @@ HipPlatform::PlatformData::PlatformData(ContextImpl* context, const System& syst
     propertyValues[HipPlatform::HipTempDirectory()] = tempProperty;
     propertyValues[HipPlatform::HipDisablePmeStream()] = disablePmeStream ? "true" : "false";
     propertyValues[HipPlatform::HipDeterministicForces()] = deterministicForces ? "true" : "false";
+    propertyValues[HipPlatform::HipFFTBackend()] = fftBackendProperty;
     contextEnergy.resize(contexts.size());
 
     // Determine whether peer-to-peer copying is supported, and enable it if so.

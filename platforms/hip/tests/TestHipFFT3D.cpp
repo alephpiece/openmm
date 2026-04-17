@@ -58,7 +58,8 @@ void testTransform(bool realToComplex, int xsize, int ysize, int zsize, double e
     system.addParticle(0.0);
     HipPlatform::PlatformData platformData(NULL, system, "", "true", platform.getPropertyDefaultValue("HipPrecision"), "false",
             platform.getPropertyDefaultValue(HipPlatform::HipTempDirectory()),
-            platform.getPropertyDefaultValue(HipPlatform::HipDisablePmeStream()), "false", 1, NULL);
+            platform.getPropertyDefaultValue(HipPlatform::HipDisablePmeStream()), "false",
+            platform.getPropertyDefaultValue(HipPlatform::HipFFTBackend()), 1, NULL);
     HipContext& context = *platformData.contexts[0];
     context.initialize();
     context.setAsCurrent();

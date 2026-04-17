@@ -31,6 +31,7 @@
 #include "HipBondedUtilities.h"
 #include "HipEvent.h"
 #include "HipFFT3D.h"
+#include "HipHipFFT3D.h"
 #include "HipIntegrationUtilities.h"
 #include "HipKernels.h"
 #include "HipKernelSources.h"
@@ -79,6 +80,12 @@
 
 using namespace OpenMM;
 using namespace std;
+
+static string normalizeFftBackendName(const string& value) {
+    string result = value;
+    transform(result.begin(), result.end(), result.begin(), ::tolower);
+    return result;
+}
 
 const int HipContext::ThreadBlockSize = 64;
 const int HipContext::TileSize = 32;
@@ -712,7 +719,12 @@ ComputeSort HipContext::createSort(ComputeSortImpl::SortTrait* trait, unsigned i
 }
 
 FFT3D HipContext::createFFT(int xsize, int ysize, int zsize, bool realToComplex) {
-    return FFT3D(new HipFFT3D(*this, xsize, ysize, zsize, realToComplex));
+    string backend = normalizeFftBackendName(platformData.propertyValues[HipPlatform::HipFFTBackend()]);
+    if (backend.empty() || backend == "vkfft")
+        return FFT3D(new HipFFT3D(*this, xsize, ysize, zsize, realToComplex));
+    if (backend == "hipfft")
+        return FFT3D(new HipHipFFT3D(*this, xsize, ysize, zsize, realToComplex));
+    throw OpenMMException("Illegal value for FFTBackend: "+backend);
 }
 
 int HipContext::findLegalFFTDimension(int minimum) {
