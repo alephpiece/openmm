@@ -73,7 +73,7 @@ HipNonbondedUtilities::HipNonbondedUtilities(HipContext& context) : context(cont
     // accelerate the process.  This makes building the neighbor list faster, but it prevents
     // us from sorting atom blocks by size, which leads to a slightly less efficient neighbor
     // list.  We guess based on system size which will be faster.
-    useLargeBlocks = false;
+    useLargeBlocks = (context.getNumAtoms() > 150000);
     setKernelSource(HipKernelSources::nonbonded);
 }
 
