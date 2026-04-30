@@ -287,6 +287,15 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
     bool usePeriodic = (nonbondedMethod != NoCutoff && nonbondedMethod != CutoffNonPeriodic);
     doLJPME = (nonbondedMethod == LJPME && hasLJ);
     usePosqCharges = hasCoulomb ? cc.requestPosqCharges() : false;
+    pmeDispersionSpreadWaveSize = 64;
+    pmeDispersionSpreadBlockSize = 256;
+    pmeDispersionAtomsPerWave = pmeDispersionSpreadWaveSize/PmeOrder;
+    pmeDispersionAtomsPerBlock = (pmeDispersionSpreadBlockSize/pmeDispersionSpreadWaveSize)*pmeDispersionAtomsPerWave;
+    // The LDS spread path assumes wave64 execution and is only used for HIP LJ-PME fixed point spreading.
+    usePmeDispersionWave64LdsSpread = (getPlatform().getName() == "HIP" &&
+            doLJPME && useFixedPointChargeSpreading && PmeOrder == 5 &&
+            cc.getSIMDWidth() == pmeDispersionSpreadWaveSize &&
+            cc.getMaxThreadBlockSize() >= pmeDispersionSpreadBlockSize);
     map<string, string> defines;
     defines["HAS_COULOMB"] = (hasCoulomb ? "1" : "0");
     defines["HAS_LENNARD_JONES"] = (hasLJ ? "1" : "0");
@@ -833,9 +842,16 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                 pmeDefines["RECIP_EXP_FACTOR"] = cc.doubleToString(M_PI*M_PI/(dispersionAlpha*dispersionAlpha));
                 pmeDefines["USE_LJPME"] = "1";
                 pmeDefines["CHARGE_FROM_SIGEPS"] = "1";
+                if (usePmeDispersionWave64LdsSpread) {
+                    pmeDefines["PME_USE_WAVE64_LDS_SPREAD"] = "1";
+                    pmeDefines["PME_SPREAD_WAVE_SIZE"] = cc.intToString(pmeDispersionSpreadWaveSize);
+                    pmeDefines["PME_SPREAD_BLOCK_SIZE"] = cc.intToString(pmeDispersionSpreadBlockSize);
+                    pmeDefines["PME_SPREAD_ATOMS_PER_WAVE"] = cc.intToString(pmeDispersionAtomsPerWave);
+                    pmeDefines["PME_SPREAD_ATOMS_PER_BLOCK"] = cc.intToString(pmeDispersionAtomsPerBlock);
+                }
                 program = cc.compileProgram(CommonKernelSources::pme, pmeDefines);
                 pmeDispersionGridIndexKernel = program->createKernel("findAtomGridIndex");
-                pmeDispersionSpreadChargeKernel = program->createKernel("gridSpreadCharge");
+                pmeDispersionSpreadChargeKernel = program->createKernel(usePmeDispersionWave64LdsSpread ? "gridSpreadChargeWave64Lds" : "gridSpreadCharge");
                 pmeDispersionConvolutionKernel = program->createKernel("reciprocalConvolution");
                 pmeDispersionEvalEnergyKernel = program->createKernel("gridEvaluateEnergy");
                 pmeDispersionInterpolateForceKernel = program->createKernel("gridInterpolateForce");
@@ -1070,9 +1086,14 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                 pmeDispersionSpreadChargeKernel->setArg(8, recipBoxVectorsFloat[1]);
                 pmeDispersionSpreadChargeKernel->setArg(9, recipBoxVectorsFloat[2]);
             }
-            pmeDispersionSpreadChargeKernel->execute(cc.getNumAtoms());
+            if (usePmeDispersionWave64LdsSpread) {
+                const int workSize = ((cc.getNumAtoms()+pmeDispersionAtomsPerBlock-1)/pmeDispersionAtomsPerBlock)*pmeDispersionSpreadBlockSize;
+                pmeDispersionSpreadChargeKernel->execute(workSize, pmeDispersionSpreadBlockSize);
+            }
+            else
+                pmeDispersionSpreadChargeKernel->execute(cc.getNumAtoms());
             if (useFixedPointChargeSpreading)
-                pmeDispersionFinishSpreadChargeKernel->execute(gridSizeX*gridSizeY*gridSizeZ);
+                pmeDispersionFinishSpreadChargeKernel->execute(dispersionGridSizeX*dispersionGridSizeY*dispersionGridSizeZ);
             dispersionFft->execFFT(pmeGrid1, pmeGrid2, true);
             if (cc.getUseDoublePrecision()) {
                 pmeDispersionConvolutionKernel->setArg(4, recipBoxVectors[0]);
@@ -1093,8 +1114,8 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
             if (!hasCoulomb)
                 cc.clearBuffer(pmeEnergyBuffer);
             if (includeEnergy)
-                pmeDispersionEvalEnergyKernel->execute(gridSizeX*gridSizeY*gridSizeZ);
-            pmeDispersionConvolutionKernel->execute(gridSizeX*gridSizeY*gridSizeZ);
+                pmeDispersionEvalEnergyKernel->execute(dispersionGridSizeX*dispersionGridSizeY*dispersionGridSizeZ);
+            pmeDispersionConvolutionKernel->execute(dispersionGridSizeX*dispersionGridSizeY*dispersionGridSizeZ);
             dispersionFft->execFFT(pmeGrid2, pmeGrid1, false);
             setPeriodicBoxArgs(cc, pmeDispersionInterpolateForceKernel, 3);
             if (cc.getUseDoublePrecision()) {
