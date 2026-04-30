@@ -120,6 +120,131 @@ KERNEL void gridSpreadCharge(GLOBAL const real4* RESTRICT posq,
     }
 }
 
+#if defined(USE_HIP) && defined(CHARGE_FROM_SIGEPS) && PME_ORDER == 5 && defined(PME_USE_WAVE64_LDS_SPREAD)
+// HIP LJ-PME dispersion spread variant for wave64 hardware.  It keeps the generic
+// PME spread algorithm unchanged, but maps one atom across PME_ORDER wavefront
+// lanes so the five z-slices can be accumulated in parallel after one lane
+// computes the atom's charge, grid index, and B-spline coefficients.
+KERNEL void gridSpreadChargeWave64Lds(GLOBAL const real4* RESTRICT posq,
+#ifdef USE_FIXED_POINT_CHARGE_SPREADING
+        GLOBAL mm_ulong* RESTRICT pmeGrid,
+#else
+        GLOBAL real* RESTRICT pmeGrid,
+#endif
+        real4 periodicBoxSize, real4 invPeriodicBoxSize, real4 periodicBoxVecX, real4 periodicBoxVecY, real4 periodicBoxVecZ,
+        real4 recipBoxVecX, real4 recipBoxVecY, real4 recipBoxVecZ, GLOBAL const int2* RESTRICT pmeAtomGridIndex,
+        GLOBAL const float2* RESTRICT sigmaEpsilon
+        ) {
+    real3 data[PME_ORDER];
+    const real scale = RECIP((real) (PME_ORDER-1));
+    // B-spline coefficients are stored as [localAtom][order] so all wavefront
+    // lanes for the same atom read contiguous LDS entries during the spread phase.
+    LOCAL real sharedDataX[PME_SPREAD_BLOCK_SIZE];
+    LOCAL real sharedDataY[PME_SPREAD_BLOCK_SIZE];
+    LOCAL real sharedDataZ[PME_SPREAD_BLOCK_SIZE];
+    LOCAL real sharedCharge[PME_SPREAD_ATOMS_PER_BLOCK];
+    LOCAL int sharedGridX[PME_SPREAD_ATOMS_PER_BLOCK];
+    LOCAL int sharedGridY[PME_SPREAD_ATOMS_PER_BLOCK];
+    LOCAL int sharedGridZ[PME_SPREAD_ATOMS_PER_BLOCK];
+    // Each wavefront handles floor(PME_SPREAD_WAVE_SIZE/PME_ORDER) atoms.  For
+    // PME_ORDER=5, lanes 0..4 spread one atom, lanes 5..9 spread the next, and
+    // the remaining lanes in the wavefront are inactive.
+    const int waveLane = LOCAL_ID & (PME_SPREAD_WAVE_SIZE-1);
+    const int wave = LOCAL_ID/PME_SPREAD_WAVE_SIZE;
+    int atomLane = waveLane-(waveLane/PME_ORDER)*PME_ORDER;
+    int atomInWave = waveLane/PME_ORDER;
+    int localAtom = wave*PME_SPREAD_ATOMS_PER_WAVE+atomInWave;
+    const int atomBlockStride = (GLOBAL_SIZE/PME_SPREAD_BLOCK_SIZE)*PME_SPREAD_ATOMS_PER_BLOCK;
+    for (int atomBlockStart = GROUP_ID*PME_SPREAD_ATOMS_PER_BLOCK; atomBlockStart < NUM_ATOMS; atomBlockStart += atomBlockStride) {
+        int atomIndex = atomBlockStart+localAtom;
+        bool isActive = (waveLane < PME_SPREAD_ATOMS_PER_WAVE*PME_ORDER && atomIndex < NUM_ATOMS);
+        if (isActive && atomLane == 0) {
+            int atom = pmeAtomGridIndex[atomIndex].x;
+            real4 pos = posq[atom];
+            const float2 sigEps = sigmaEpsilon[atom];
+            const real charge = 8*sigEps.x*sigEps.x*sigEps.x*sigEps.y;
+            APPLY_PERIODIC_TO_POS(pos)
+            real3 t = make_real3(pos.x*recipBoxVecX.x+pos.y*recipBoxVecY.x+pos.z*recipBoxVecZ.x,
+                                 pos.y*recipBoxVecY.y+pos.z*recipBoxVecZ.y,
+                                 pos.z*recipBoxVecZ.z);
+            t.x = (t.x-floor(t.x))*GRID_SIZE_X;
+            t.y = (t.y-floor(t.y))*GRID_SIZE_Y;
+            t.z = (t.z-floor(t.z))*GRID_SIZE_Z;
+            int3 gridIndex = make_int3(((int) t.x) % GRID_SIZE_X,
+                                       ((int) t.y) % GRID_SIZE_Y,
+                                       ((int) t.z) % GRID_SIZE_Z);
+            sharedCharge[localAtom] = charge;
+            sharedGridX[localAtom] = gridIndex.x;
+            sharedGridY[localAtom] = gridIndex.y;
+            sharedGridZ[localAtom] = gridIndex.z;
+
+            real3 dr = make_real3(t.x-(int) t.x, t.y-(int) t.y, t.z-(int) t.z);
+            data[PME_ORDER-1] = make_real3(0);
+            data[1] = dr;
+            data[0] = make_real3(1)-dr;
+            for (int j = 3; j < PME_ORDER; j++) {
+                real div = RECIP((real) (j-1));
+                data[j-1] = div*dr*data[j-2];
+                for (int k = 1; k < (j-1); k++)
+                    data[j-k-1] = div*((dr+make_real3(k))*data[j-k-2] + (make_real3(j-k)-dr)*data[j-k-1]);
+                data[0] = div*(make_real3(1)-dr)*data[0];
+            }
+            data[PME_ORDER-1] = scale*dr*data[PME_ORDER-2];
+            for (int j = 1; j < (PME_ORDER-1); j++)
+                data[PME_ORDER-j-1] = scale*((dr+make_real3(j))*data[PME_ORDER-j-2] + (make_real3(PME_ORDER-j)-dr)*data[PME_ORDER-j-1]);
+            data[0] = scale*(make_real3(1)-dr)*data[0];
+            for (int j = 0; j < PME_ORDER; j++) {
+                int offset = localAtom*PME_ORDER+j;
+                sharedDataX[offset] = data[j].x;
+                sharedDataY[offset] = data[j].y;
+                sharedDataZ[offset] = data[j].z;
+            }
+        }
+        // All consumers of an atom's LDS data are in the same wavefront as the
+        // producing lane, so a wave-level barrier is sufficient here.
+        SYNC_WARPS
+        if (isActive) {
+            real charge = sharedCharge[localAtom];
+            if (charge != 0) {
+                int gridX = sharedGridX[localAtom];
+                int gridY = sharedGridY[localAtom];
+                int gridZ = sharedGridZ[localAtom];
+                int zindex = gridZ+atomLane;
+                zindex -= (zindex >= GRID_SIZE_Z ? GRID_SIZE_Z : 0);
+                real dz = sharedDataZ[localAtom*PME_ORDER+atomLane]*charge;
+                for (int ix = 0; ix < PME_ORDER; ix++) {
+                    int xbase = gridX+ix;
+                    xbase -= (xbase >= GRID_SIZE_X ? GRID_SIZE_X : 0);
+                    xbase = xbase*GRID_SIZE_Y*GRID_SIZE_Z;
+                    real dzdx = dz*sharedDataX[localAtom*PME_ORDER+ix];
+                    for (int iy = 0; iy < PME_ORDER; iy++) {
+                        int ybase = gridY+iy;
+                        ybase -= (ybase >= GRID_SIZE_Y ? GRID_SIZE_Y : 0);
+                        ybase = ybase*GRID_SIZE_Z;
+                        int index = xbase + ybase + zindex;
+                        real add = dzdx*sharedDataY[localAtom*PME_ORDER+iy];
+                        if (fabs(add) > 2.3e-10f) { // Smallest value representable in 64 bit fixed point
+#ifdef USE_FIXED_POINT_CHARGE_SPREADING
+                            ATOMIC_ADD(&pmeGrid[index], (mm_ulong) realToFixedPoint(add));
+#if defined(__GFX12__) && defined(USE_HIP)
+                            // Workaround for rare cases when few values of pmeGrid are very large and
+                            // incorrect. The cause is unknown. Why this workaround or other irrelevant
+                            // changes like printf help is also unknown.
+                            asm volatile("s_wait_storecnt 0x0");
+#endif
+#else
+                            ATOMIC_ADD(&pmeGrid[index], add);
+#endif
+                        }
+                    }
+                }
+            }
+        }
+        SYNC_WARPS
+    }
+}
+#endif
+
 #ifdef USE_FIXED_POINT_CHARGE_SPREADING
 
 KERNEL void finishSpreadCharge(
