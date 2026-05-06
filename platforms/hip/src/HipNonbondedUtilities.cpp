@@ -549,11 +549,9 @@ void HipNonbondedUtilities::createKernelsForGroups(int groups) {
             }
             else {
                 if (context.getSIMDWidth() > 32) {
-                    // CDNA
-                    if (context.getNumAtoms() < 100000)
-                        maxBits = 4;
-                    else // Large systems
-                        maxBits = 0;
+                    // CDNA wave64 GPUs benefit from storing more sparse
+                    // interactions as single pairs.
+                    maxBits = 8;
                 }
                 else {
                     // RDNA

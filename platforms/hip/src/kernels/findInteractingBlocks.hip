@@ -553,10 +553,10 @@ extern "C" __global__ __launch_bounds__(GROUP_SIZE) void findBlocksWithInteracti
                 if (__ballot(storeAsSinglePair)) {
                     unsigned int sum = 0;
                     unsigned int prevSum = 0;
-                    for (int i = 1; i <= MAX_BITS_FOR_PAIRS; i++) {
-                        warpflags b = __ballot(interactCount == i);
-                        sum += warpPopc(b) * i;
-                        prevSum += warpPopc(b&warpMask) * i;
+                    for (int bit = 1; bit <= MAX_BITS_FOR_PAIRS; bit <<= 1) {
+                        warpflags b = __ballot(storeAsSinglePair && ((interactCount & bit) != 0));
+                        sum += warpPopc(b) * bit;
+                        prevSum += warpPopc(b&warpMask) * bit;
                     }
                     unsigned int pairStartIndex = 0;
                     if (indexInWarp == 0)

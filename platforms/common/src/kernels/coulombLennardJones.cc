@@ -41,8 +41,12 @@
 #if DO_LJPME
     // The multiplicative term to correct for the multiplicative terms that are always
     // present in reciprocal space.
+#if defined(USE_HIP)
+    const real dar2 = EWALD_DISPERSION_ALPHA*EWALD_DISPERSION_ALPHA*r2;
+#else
     const real dispersionAlphaR = EWALD_DISPERSION_ALPHA*r;
     const real dar2 = dispersionAlphaR*dispersionAlphaR;
+#endif
     const real dar4 = dar2*dar2;
     const real dar6 = dar4*dar2;
     const real invR2 = invR*invR;
