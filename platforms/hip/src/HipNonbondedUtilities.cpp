@@ -65,8 +65,8 @@ HipNonbondedUtilities::HipNonbondedUtilities(HipContext& context) : context(cont
     string errorMessage = "Error initializing nonbonded utilities";
     CHECK_RESULT(hipEventCreateWithFlags(&downloadCountEvent, context.getEventFlags()));
     CHECK_RESULT(hipHostMalloc((void**) &pinnedCountBuffer, 2*sizeof(unsigned int), context.getHostMallocFlags()));
-    numForceThreadBlocks = 16*4*context.getMultiprocessors();
-    forceThreadBlockSize = 256;
+    numForceThreadBlocks = 16*2*context.getMultiprocessors();
+    forceThreadBlockSize = 512;
     findInteractingBlocksThreadBlockSize = 128;
 
     // When building the neighbor list, we can optionally use large blocks (32 * warpSize atoms) to
@@ -268,8 +268,9 @@ void HipNonbondedUtilities::initialize(const System& system) {
         if (maxTiles < 1)
             maxTiles = 1;
         maxSinglePairs = 5*numAtoms;
-        // HIP-TODO: This may require tuning
-        numTilesInBatch = numAtomBlocks < 2000 ? 4 : 1;
+        // Use two search partitions to improve occupancy when building
+        // neighbor lists for larger systems.
+        numTilesInBatch = 2;
         interactingTiles.initialize<int>(context, maxTiles, "interactingTiles");
         interactingAtoms.initialize<int>(context, HipContext::TileSize*maxTiles, "interactingAtoms");
         interactionCount.initialize<unsigned int>(context, 2, "interactionCount");
@@ -424,7 +425,9 @@ void HipNonbondedUtilities::prepareInteractions(int forceGroups) {
 
     context.executeKernelFlat(kernels.findBlockBoundsKernel, &findBlockBoundsArgs[0], context.getPaddedNumAtoms(), context.getSIMDWidth());
     context.executeKernelFlat(kernels.computeSortKeysKernel, &computeSortKeysArgs[0], context.getNumAtomBlocks());
-    blockSorter->sort(sortedBlocks);
+    // Keep atom blocks in their original order.  This avoids the overhead of
+    // sorting and gives better overall neighbor-list/direct-space balance.
+    // blockSorter->sort(sortedBlocks);
     context.executeKernelFlat(kernels.sortBoxDataKernel, &sortBoxDataArgs[0], context.getNumAtoms(), 64);
     context.executeKernelFlat(kernels.findInteractingBlocksKernel, &findInteractingBlocksArgs[0], context.getNumAtomBlocks() * context.getSIMDWidth() * numTilesInBatch, findInteractingBlocksThreadBlockSize);
     forceRebuildNeighborList = false;
