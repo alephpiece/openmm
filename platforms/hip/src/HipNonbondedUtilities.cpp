@@ -65,7 +65,7 @@ HipNonbondedUtilities::HipNonbondedUtilities(HipContext& context) : context(cont
     string errorMessage = "Error initializing nonbonded utilities";
     CHECK_RESULT(hipEventCreateWithFlags(&downloadCountEvent, context.getEventFlags()));
     CHECK_RESULT(hipHostMalloc((void**) &pinnedCountBuffer, 2*sizeof(unsigned int), context.getHostMallocFlags()));
-    numForceThreadBlocks = 16*4*context.getMultiprocessors();
+    numForceThreadBlocks = 48*context.getMultiprocessors();
     forceThreadBlockSize = 256;
     findInteractingBlocksThreadBlockSize = 128;
 
@@ -185,6 +185,9 @@ void HipNonbondedUtilities::initialize(const System& system) {
 
     numAtoms = context.getNumAtoms();
     int numAtomBlocks = context.getNumAtomBlocks();
+    const int blocksPerCU = (useNeighborList && numAtomBlocks < 2000 ? 24 : 48);
+    numForceThreadBlocks = blocksPerCU*context.getMultiprocessors();
+    findInteractingBlocksThreadBlockSize = (useNeighborList && numAtomBlocks < 2000 ? 256 : 128);
     int numContexts = context.getPlatformData().contexts.size();
     setAtomBlockRange(context.getContextIndex()/(double) numContexts, (context.getContextIndex()+1)/(double) numContexts);
 
@@ -269,7 +272,7 @@ void HipNonbondedUtilities::initialize(const System& system) {
             maxTiles = 1;
         maxSinglePairs = 5*numAtoms;
         // HIP-TODO: This may require tuning
-        numTilesInBatch = numAtomBlocks < 2000 ? 4 : 1;
+        numTilesInBatch = numAtomBlocks < 2000 ? 4 : 2;
         interactingTiles.initialize<int>(context, maxTiles, "interactingTiles");
         interactingAtoms.initialize<int>(context, HipContext::TileSize*maxTiles, "interactingAtoms");
         interactionCount.initialize<unsigned int>(context, 2, "interactionCount");
