@@ -41,12 +41,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #ifdef _MSC_VER
 #include <windows.h>
 #endif
 
 using namespace OpenMM;
 using namespace std;
+
+static const int MaxHipPmeFastGridLevel = 32;
 
 static void setPeriodicBoxArgs(ComputeContext& cc, ComputeKernel kernel, int index) {
     Vec3 a, b, c;
@@ -64,6 +67,40 @@ static void setPeriodicBoxArgs(ComputeContext& cc, ComputeKernel kernel, int ind
         kernel->setArg(index++, mm_float4((float) a[0], (float) a[1], (float) a[2], 0.0f));
         kernel->setArg(index++, mm_float4((float) b[0], (float) b[1], (float) b[2], 0.0f));
         kernel->setArg(index, mm_float4((float) c[0], (float) c[1], (float) c[2], 0.0f));
+    }
+}
+
+static int getHipPmeFastGridLevel(bool isHip) {
+    if (!isHip)
+        return 0;
+    const char* value = getenv("OPENMM_HIP_PME_FAST_GRID_LEVEL");
+    if (value == NULL)
+        return 0;
+    char* end = NULL;
+    long level = strtol(value, &end, 10);
+    if (end == value || level <= 0)
+        return 0;
+    return (int) min(level, (long) MaxHipPmeFastGridLevel);
+}
+
+static bool usesAutomaticPmeGrid(double alpha, int xsize, int ysize, int zsize) {
+    return (alpha == 0.0 && xsize == 0 && ysize == 0 && zsize == 0);
+}
+
+static int findPreviousLegalFFTDimension(ComputeContext& cc, int size) {
+    for (int candidate = size-1; candidate > 0; candidate--)
+        if (cc.findLegalFFTDimension(candidate) == candidate)
+            return candidate;
+    return size;
+}
+
+static void applyHipPmeFastGrid(ComputeContext& cc, int level, int& xsize, int& ysize, int& zsize) {
+    if (level == 0)
+        return;
+    for (int i = 0; i < level; i++) {
+        xsize = findPreviousLegalFFTDimension(cc, xsize);
+        ysize = findPreviousLegalFFTDimension(cc, ysize);
+        zsize = findPreviousLegalFFTDimension(cc, zsize);
     }
 }
 
@@ -427,12 +464,15 @@ void CommonCalcAmoebaMultipoleForceKernel::initialize(const System& system, cons
         double sum = 0;
         for (int j = i; j < maxExtrapolationOrder; j++)
             sum += force.getExtrapolationCoefficients()[j];
-        coefficients << cc.doubleToString(sum);
+            coefficients << cc.doubleToString(sum);
     }
     defines["EXTRAPOLATION_COEFFICIENTS_SUM"] = coefficients.str();
+    bool isHip = (getPlatform().getName() == "HIP");
+    int hipPmeFastGridLevel = getHipPmeFastGridLevel(isHip);
     if (usePME) {
         int nx, ny, nz;
         force.getPMEParameters(pmeAlpha, nx, ny, nz);
+        bool useAutomaticPmeGrid = usesAutomaticPmeGrid(pmeAlpha, nx, ny, nz);
         if (nx == 0 || pmeAlpha == 0) {
             NonbondedForce nb;
             nb.setEwaldErrorTolerance(force.getEwaldErrorTolerance());
@@ -441,6 +481,8 @@ void CommonCalcAmoebaMultipoleForceKernel::initialize(const System& system, cons
             gridSizeX = cc.findLegalFFTDimension(gridSizeX);
             gridSizeY = cc.findLegalFFTDimension(gridSizeY);
             gridSizeZ = cc.findLegalFFTDimension(gridSizeZ);
+            if (useAutomaticPmeGrid)
+                applyHipPmeFastGrid(cc, hipPmeFastGridLevel, gridSizeX, gridSizeY, gridSizeZ);
         }
         else {
             gridSizeX = cc.findLegalFFTDimension(nx);
@@ -2573,9 +2615,12 @@ void CommonCalcHippoNonbondedForceKernel::initialize(const System& system, const
     }
     defines["EXTRAPOLATION_COEFFICIENTS_SUM"] = coefficients.str();
     cutoff = force.getCutoffDistance();
+    bool isHip = (getPlatform().getName() == "HIP");
+    int hipPmeFastGridLevel = getHipPmeFastGridLevel(isHip);
     if (usePME) {
         int nx, ny, nz;
         force.getPMEParameters(pmeAlpha, nx, ny, nz);
+        bool useAutomaticPmeGrid = usesAutomaticPmeGrid(pmeAlpha, nx, ny, nz);
         if (nx == 0 || pmeAlpha == 0) {
             NonbondedForce nb;
             nb.setEwaldErrorTolerance(force.getEwaldErrorTolerance());
@@ -2584,6 +2629,8 @@ void CommonCalcHippoNonbondedForceKernel::initialize(const System& system, const
             gridSizeX = cc.findLegalFFTDimension(gridSizeX);
             gridSizeY = cc.findLegalFFTDimension(gridSizeY);
             gridSizeZ = cc.findLegalFFTDimension(gridSizeZ);
+            if (useAutomaticPmeGrid)
+                applyHipPmeFastGrid(cc, hipPmeFastGridLevel, gridSizeX, gridSizeY, gridSizeZ);
         }
         else {
             gridSizeX = cc.findLegalFFTDimension(nx);
@@ -2591,6 +2638,7 @@ void CommonCalcHippoNonbondedForceKernel::initialize(const System& system, const
             gridSizeZ = cc.findLegalFFTDimension(nz);
         }
         force.getDPMEParameters(dpmeAlpha, nx, ny, nz);
+        bool useAutomaticDispersionGrid = usesAutomaticPmeGrid(dpmeAlpha, nx, ny, nz);
         if (nx == 0 || dpmeAlpha == 0) {
             NonbondedForce nb;
             nb.setEwaldErrorTolerance(force.getEwaldErrorTolerance());
@@ -2599,6 +2647,8 @@ void CommonCalcHippoNonbondedForceKernel::initialize(const System& system, const
             dispersionGridSizeX = cc.findLegalFFTDimension(dispersionGridSizeX);
             dispersionGridSizeY = cc.findLegalFFTDimension(dispersionGridSizeY);
             dispersionGridSizeZ = cc.findLegalFFTDimension(dispersionGridSizeZ);
+            if (useAutomaticDispersionGrid)
+                applyHipPmeFastGrid(cc, hipPmeFastGridLevel, dispersionGridSizeX, dispersionGridSizeY, dispersionGridSizeZ);
         }
         else {
             dispersionGridSizeX = cc.findLegalFFTDimension(nx);

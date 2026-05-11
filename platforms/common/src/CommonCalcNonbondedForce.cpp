@@ -34,11 +34,51 @@
 #include <algorithm>
 #include <assert.h>
 #include <cmath>
+#include <cstdlib>
 #include <iterator>
 #include <set>
 
 using namespace OpenMM;
 using namespace std;
+
+namespace {
+static const int MaxHipPmeFastGridLevel = 32;
+
+static int getHipPmeFastGridLevel(bool isHip) {
+    if (!isHip)
+        return 0;
+    const char* value = getenv("OPENMM_HIP_PME_FAST_GRID_LEVEL");
+    if (value == NULL)
+        return 0;
+    char* end = NULL;
+    long level = strtol(value, &end, 10);
+    if (end == value || level <= 0)
+        return 0;
+    return (int) min(level, (long) MaxHipPmeFastGridLevel);
+}
+
+static bool usesAutomaticPmeGrid(double alpha, int xsize, int ysize, int zsize) {
+    return (alpha == 0.0 && xsize == 0 && ysize == 0 && zsize == 0);
+}
+
+static int findPreviousLegalFFTDimension(ComputeContext& cc, int size) {
+    for (int candidate = size-1; candidate > 0; candidate--)
+        if (cc.findLegalFFTDimension(candidate) == candidate)
+            return candidate;
+    return size;
+}
+
+static void applyHipPmeFastGrid(ComputeContext& cc, int level, int& xsize, int& ysize, int& zsize) {
+    if (level == 0)
+        return;
+    for (int i = 0; i < level; i++) {
+        xsize = findPreviousLegalFFTDimension(cc, xsize);
+        ysize = findPreviousLegalFFTDimension(cc, ysize);
+        zsize = findPreviousLegalFFTDimension(cc, zsize);
+    }
+}
+
+}
 
 class CommonCalcNonbondedForceKernel::ForceInfo : public ComputeForceInfo {
 public:
@@ -292,6 +332,7 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
     pmeGridIndexBlockSize = useLargeHipPmeBlocks ? 128 : -1;
     pmeSpreadChargeBlockSize = useLargeHipPmeBlocks ? 128 : -1;
     pmeFinishSpreadChargeBlockSize = isHip ? 128 : -1;
+    int hipPmeFastGridLevel = getHipPmeFastGridLevel(isHip);
     pmeDispersionSpreadWaveSize = 64;
     pmeDispersionSpreadBlockSize = 256;
     pmeDispersionAtomsPerWave = pmeDispersionSpreadWaveSize/PmeOrder;
@@ -382,16 +423,27 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
     else if (((nonbondedMethod == PME || nonbondedMethod == LJPME) && hasCoulomb) || doLJPME) {
         // Compute the PME parameters.
 
+        double requestedAlpha;
+        int requestedGridSizeX, requestedGridSizeY, requestedGridSizeZ;
+        force.getPMEParameters(requestedAlpha, requestedGridSizeX, requestedGridSizeY, requestedGridSizeZ);
+        bool useAutomaticPmeGrid = usesAutomaticPmeGrid(requestedAlpha, requestedGridSizeX, requestedGridSizeY, requestedGridSizeZ);
         NonbondedForceImpl::calcPMEParameters(system, force, alpha, gridSizeX, gridSizeY, gridSizeZ, false);
         gridSizeX = cc.findLegalFFTDimension(gridSizeX);
         gridSizeY = cc.findLegalFFTDimension(gridSizeY);
         gridSizeZ = cc.findLegalFFTDimension(gridSizeZ);
+        if (useAutomaticPmeGrid)
+            applyHipPmeFastGrid(cc, hipPmeFastGridLevel, gridSizeX, gridSizeY, gridSizeZ);
         if (doLJPME) {
+            double requestedDispersionAlpha;
+            force.getLJPMEParameters(requestedDispersionAlpha, requestedGridSizeX, requestedGridSizeY, requestedGridSizeZ);
+            bool useAutomaticDispersionGrid = usesAutomaticPmeGrid(requestedDispersionAlpha, requestedGridSizeX, requestedGridSizeY, requestedGridSizeZ);
             NonbondedForceImpl::calcPMEParameters(system, force, dispersionAlpha, dispersionGridSizeX,
                                                   dispersionGridSizeY, dispersionGridSizeZ, true);
             dispersionGridSizeX = cc.findLegalFFTDimension(dispersionGridSizeX);
             dispersionGridSizeY = cc.findLegalFFTDimension(dispersionGridSizeY);
             dispersionGridSizeZ = cc.findLegalFFTDimension(dispersionGridSizeZ);
+            if (useAutomaticDispersionGrid)
+                applyHipPmeFastGrid(cc, hipPmeFastGridLevel, dispersionGridSizeX, dispersionGridSizeY, dispersionGridSizeZ);
         }
         defines["EWALD_ALPHA"] = cc.doubleToString(alpha);
         defines["TWO_OVER_SQRT_PI"] = cc.doubleToString(2.0/sqrt(M_PI));
