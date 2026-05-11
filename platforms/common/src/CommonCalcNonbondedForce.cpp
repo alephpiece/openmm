@@ -287,12 +287,17 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
     bool usePeriodic = (nonbondedMethod != NoCutoff && nonbondedMethod != CutoffNonPeriodic);
     doLJPME = (nonbondedMethod == LJPME && hasLJ);
     usePosqCharges = hasCoulomb ? cc.requestPosqCharges() : false;
+    bool isHip = (getPlatform().getName() == "HIP");
+    bool useLargeHipPmeBlocks = (isHip && cc.getNumAtomBlocks() >= 2000);
+    pmeGridIndexBlockSize = useLargeHipPmeBlocks ? 128 : -1;
+    pmeSpreadChargeBlockSize = useLargeHipPmeBlocks ? 128 : -1;
+    pmeFinishSpreadChargeBlockSize = isHip ? 128 : -1;
     pmeDispersionSpreadWaveSize = 64;
     pmeDispersionSpreadBlockSize = 256;
     pmeDispersionAtomsPerWave = pmeDispersionSpreadWaveSize/PmeOrder;
     pmeDispersionAtomsPerBlock = (pmeDispersionSpreadBlockSize/pmeDispersionSpreadWaveSize)*pmeDispersionAtomsPerWave;
     // The LDS spread path assumes wave64 execution and is only used for HIP LJ-PME fixed point spreading.
-    usePmeDispersionWave64LdsSpread = (getPlatform().getName() == "HIP" &&
+    usePmeDispersionWave64LdsSpread = (isHip &&
             doLJPME && useFixedPointChargeSpreading && PmeOrder == 5 &&
             cc.getSIMDWidth() == pmeDispersionSpreadWaveSize &&
             cc.getMaxThreadBlockSize() >= pmeDispersionSpreadBlockSize);
@@ -994,7 +999,7 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                     pmeGridIndexKernel->setArg(8, recipBoxVectorsFloat[1]);
                     pmeGridIndexKernel->setArg(9, recipBoxVectorsFloat[2]);
                 }
-                pmeGridIndexKernel->execute(cc.getNumAtoms());
+                pmeGridIndexKernel->execute(cc.getNumAtoms(), pmeGridIndexBlockSize);
                 sort->sort(pmeAtomGridIndex);
                 stepsToSort = 3;
             }
@@ -1011,9 +1016,9 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                 pmeSpreadChargeKernel->setArg(8, recipBoxVectorsFloat[1]);
                 pmeSpreadChargeKernel->setArg(9, recipBoxVectorsFloat[2]);
             }
-            pmeSpreadChargeKernel->execute(cc.getNumAtoms());
+            pmeSpreadChargeKernel->execute(cc.getNumAtoms(), pmeSpreadChargeBlockSize);
             if (useFixedPointChargeSpreading)
-                pmeFinishSpreadChargeKernel->execute(gridSizeX*gridSizeY*gridSizeZ);
+                pmeFinishSpreadChargeKernel->execute(gridSizeX*gridSizeY*gridSizeZ, pmeFinishSpreadChargeBlockSize);
             fft->execFFT(pmeGrid1, pmeGrid2, true);
             if (cc.getUseDoublePrecision()) {
                 pmeConvolutionKernel->setArg<mm_double4>(4, recipBoxVectors[0]);
@@ -1065,7 +1070,7 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                     pmeDispersionGridIndexKernel->setArg(8, recipBoxVectorsFloat[1]);
                     pmeDispersionGridIndexKernel->setArg(9, recipBoxVectorsFloat[2]);
                 }
-                pmeDispersionGridIndexKernel->execute(cc.getNumAtoms());
+                pmeDispersionGridIndexKernel->execute(cc.getNumAtoms(), pmeGridIndexBlockSize);
                 sort->sort(pmeDispersionAtomGridIndex);
                 dispersionStepsToSort = 3;
             }
@@ -1091,9 +1096,9 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                 pmeDispersionSpreadChargeKernel->execute(workSize, pmeDispersionSpreadBlockSize);
             }
             else
-                pmeDispersionSpreadChargeKernel->execute(cc.getNumAtoms());
+                pmeDispersionSpreadChargeKernel->execute(cc.getNumAtoms(), pmeSpreadChargeBlockSize);
             if (useFixedPointChargeSpreading)
-                pmeDispersionFinishSpreadChargeKernel->execute(dispersionGridSizeX*dispersionGridSizeY*dispersionGridSizeZ);
+                pmeDispersionFinishSpreadChargeKernel->execute(dispersionGridSizeX*dispersionGridSizeY*dispersionGridSizeZ, pmeFinishSpreadChargeBlockSize);
             dispersionFft->execFFT(pmeGrid1, pmeGrid2, true);
             if (cc.getUseDoublePrecision()) {
                 pmeDispersionConvolutionKernel->setArg(4, recipBoxVectors[0]);
