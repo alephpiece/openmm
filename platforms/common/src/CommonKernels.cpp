@@ -3187,11 +3187,11 @@ void CommonIntegrateLangevinMiddleStepKernel::execute(ContextImpl& context, cons
     // Perform the integration.
 
     kernel2->setArg(7, integration.prepareRandomNumbers(cc.getPaddedNumAtoms()));
-    kernel1->execute(numAtoms);
+    kernel1->execute(numAtoms, 128);
     integration.applyVelocityConstraints(integrator.getConstraintTolerance());
-    kernel2->execute(numAtoms);
+    kernel2->execute(numAtoms, 128);
     integration.applyConstraints(integrator.getConstraintTolerance());
-    kernel3->execute(numAtoms);
+    kernel3->execute(numAtoms, 128);
     integration.computeVirtualSites();
 
     // Update the time and step count.
