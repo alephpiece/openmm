@@ -290,15 +290,6 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
     pmeGridIndexBlockSize = useLargeHipPmeBlocks ? 128 : -1;
     pmeSpreadChargeBlockSize = useLargeHipPmeBlocks ? 128 : -1;
     pmeFinishSpreadChargeBlockSize = isHip ? 128 : -1;
-    pmeDispersionSpreadWaveSize = 64;
-    pmeDispersionSpreadBlockSize = 256;
-    pmeDispersionAtomsPerWave = pmeDispersionSpreadWaveSize/PmeOrder;
-    pmeDispersionAtomsPerBlock = (pmeDispersionSpreadBlockSize/pmeDispersionSpreadWaveSize)*pmeDispersionAtomsPerWave;
-    // The LDS spread path assumes wave64 execution and is only used for HIP LJ-PME fixed point spreading.
-    usePmeDispersionWave64LdsSpread = (isHip &&
-            doLJPME && useFixedPointChargeSpreading && PmeOrder == 5 &&
-            cc.getSIMDWidth() == pmeDispersionSpreadWaveSize &&
-            cc.getMaxThreadBlockSize() >= pmeDispersionSpreadBlockSize);
     map<string, string> defines;
     defines["HAS_COULOMB"] = (hasCoulomb ? "1" : "0");
     defines["HAS_LENNARD_JONES"] = (hasLJ ? "1" : "0");
@@ -845,16 +836,9 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                 pmeDefines["RECIP_EXP_FACTOR"] = cc.doubleToString(M_PI*M_PI/(dispersionAlpha*dispersionAlpha));
                 pmeDefines["USE_LJPME"] = "1";
                 pmeDefines["CHARGE_FROM_SIGEPS"] = "1";
-                if (usePmeDispersionWave64LdsSpread) {
-                    pmeDefines["PME_USE_WAVE64_LDS_SPREAD"] = "1";
-                    pmeDefines["PME_SPREAD_WAVE_SIZE"] = cc.intToString(pmeDispersionSpreadWaveSize);
-                    pmeDefines["PME_SPREAD_BLOCK_SIZE"] = cc.intToString(pmeDispersionSpreadBlockSize);
-                    pmeDefines["PME_SPREAD_ATOMS_PER_WAVE"] = cc.intToString(pmeDispersionAtomsPerWave);
-                    pmeDefines["PME_SPREAD_ATOMS_PER_BLOCK"] = cc.intToString(pmeDispersionAtomsPerBlock);
-                }
                 program = cc.compileProgram(CommonKernelSources::pme, pmeDefines);
                 pmeDispersionGridIndexKernel = program->createKernel("findAtomGridIndex");
-                pmeDispersionSpreadChargeKernel = program->createKernel(usePmeDispersionWave64LdsSpread ? "gridSpreadChargeWave64Lds" : "gridSpreadCharge");
+                pmeDispersionSpreadChargeKernel = program->createKernel("gridSpreadCharge");
                 pmeDispersionConvolutionKernel = program->createKernel("reciprocalConvolution");
                 pmeDispersionEvalEnergyKernel = program->createKernel("gridEvaluateEnergy");
                 pmeDispersionInterpolateForceKernel = program->createKernel("gridInterpolateForce");
@@ -1089,12 +1073,7 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                 pmeDispersionSpreadChargeKernel->setArg(8, recipBoxVectorsFloat[1]);
                 pmeDispersionSpreadChargeKernel->setArg(9, recipBoxVectorsFloat[2]);
             }
-            if (usePmeDispersionWave64LdsSpread) {
-                const int workSize = ((cc.getNumAtoms()+pmeDispersionAtomsPerBlock-1)/pmeDispersionAtomsPerBlock)*pmeDispersionSpreadBlockSize;
-                pmeDispersionSpreadChargeKernel->execute(workSize, pmeDispersionSpreadBlockSize);
-            }
-            else
-                pmeDispersionSpreadChargeKernel->execute(cc.getNumAtoms(), pmeSpreadChargeBlockSize);
+            pmeDispersionSpreadChargeKernel->execute(cc.getNumAtoms(), pmeSpreadChargeBlockSize);
             if (useFixedPointChargeSpreading)
                 pmeDispersionFinishSpreadChargeKernel->execute(dispersionGridSizeX*dispersionGridSizeY*dispersionGridSizeZ, pmeFinishSpreadChargeBlockSize);
             dispersionFft->execFFT(pmeGrid1, pmeGrid2, true);
